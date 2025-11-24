@@ -111,6 +111,10 @@ if __name__ == "__main__":
     policy = torch.jit.load(policy_path)
     obs_history_buf = FixedLengthQueue(max_length=history_length)
     obs_history_buf.reset(torch.from_numpy(obs).clone().unsqueeze(0))
+    
+    # set init pos
+    d.qpos[7:] = default_angles
+    d.qpos[2] = 0.786
 
     with mujoco.viewer.launch_passive(m, d) as viewer:
         # Close the viewer automatically after simulation_duration wall-seconds.
