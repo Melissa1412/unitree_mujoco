@@ -7,6 +7,8 @@ import numpy as np
 import torch
 import yaml
 
+from utils import *
+
 class FixedLengthQueue:
     def __init__(self, max_length):
         self.max_length = max_length
@@ -94,6 +96,8 @@ if __name__ == "__main__":
         cmd = np.array(config["cmd_init"], dtype=np.float32)
         
         history_length = config["history_length"]
+        
+        joint_names_lab = config["joint_names"]
 
     # define context variables
     action = np.zeros(num_actions, dtype=np.float32)
@@ -115,6 +119,11 @@ if __name__ == "__main__":
     # set init pos
     d.qpos[7:] = default_angles
     d.qpos[2] = 0.786
+    
+    joint_names_mjc = []
+    for i in range(1, m.njnt):
+        # model.joint(i).name returns the name of the i-th joint
+        joint_names_mjc.append(m.joint(i).name)    
 
     with mujoco.viewer.launch_passive(m, d) as viewer:
         # Close the viewer automatically after simulation_duration wall-seconds.
@@ -151,8 +160,8 @@ if __name__ == "__main__":
                 obs[:3] = omega
                 obs[3:6] = gravity_orientation
                 obs[6:9] = cmd * cmd_scale
-                obs[9 : 9 + num_actions] = qj
-                obs[9 + num_actions : 9 + 2 * num_actions] = dqj
+                obs[9 : 9 + num_actions] = mjc_to_lab(qj, joint_names_mjc, joint_names_lab)
+                obs[9 + num_actions : 9 + 2 * num_actions] = mjc_to_lab(dqj, joint_names_mjc, joint_names_lab)
                 obs[9 + 2 * num_actions : 9 + 3 * num_actions] = action
                 # obs[9 + 3 * num_actions : 9 + 3 * num_actions + 2] = np.array([sin_phase, cos_phase])
                 print("omega", omega)
@@ -168,6 +177,8 @@ if __name__ == "__main__":
                 # obs_tensor = torch.from_numpy(obs).unsqueeze(0)
                 # policy inference
                 action = policy(obs_tensor).detach().numpy().squeeze()
+                # transform into mjc order
+                action = lab_to_mjc(action, joint_names_lab, joint_names_mjc)
                 # transform action to target_dof_pos
                 target_dof_pos = action * action_scale + default_angles
 
