@@ -70,7 +70,7 @@ if __name__ == "__main__":
     parser.add_argument("config_file", type=str, help="config file name in the config folder")
     args = parser.parse_args()
     config_file = args.config_file
-    with open(f"/home/melwu/unitree_mujoco/simulate_python/config/{config_file}", "r") as f:
+    with open(f"simulate_python/config/{config_file}", "r") as f:
         config = yaml.load(f, Loader=yaml.FullLoader)
         policy_path = config["policy_path"]
         xml_path = config["xml_path"]
@@ -116,9 +116,9 @@ if __name__ == "__main__":
     obs_history_buf = FixedLengthQueue(max_length=history_length)
     obs_history_buf.reset(torch.from_numpy(obs).clone().unsqueeze(0))
     
-    # set init pos
-    d.qpos[7:] = default_angles
-    d.qpos[2] = 0.786
+    # # set init pos
+    # d.qpos[7:] = default_angles
+    # d.qpos[2] = 0.788
     
     joint_names_mjc = []
     for i in range(1, m.njnt):
@@ -164,12 +164,12 @@ if __name__ == "__main__":
                 obs[9 + num_actions : 9 + 2 * num_actions] = mjc_to_lab(dqj, joint_names_mjc, joint_names_lab)
                 obs[9 + 2 * num_actions : 9 + 3 * num_actions] = action
                 # obs[9 + 3 * num_actions : 9 + 3 * num_actions + 2] = np.array([sin_phase, cos_phase])
-                print("omega", omega)
-                print("gravity_orientation", gravity_orientation)
-                print("cmd", obs[6:9])
-                print("qj", obs[9 : 9 + num_actions])
-                print("dqj",obs[9 + num_actions : 9 + 2 * num_actions])
-                print("action", action)
+                # print("omega", omega)
+                # print("gravity_orientation", gravity_orientation)
+                # print("cmd", obs[6:9])
+                # print("qj", obs[9 : 9 + num_actions])
+                # print("dqj",obs[9 + num_actions : 9 + 2 * num_actions])
+                # print("action", action)
                 # with obs history
                 obs_history_buf.enqueue(torch.from_numpy(obs).clone().unsqueeze(0))
                 obs_tensor = torch.cat([obs_history_buf[i] for i in range(len(obs_history_buf))], dim=1)  # N, T*K
@@ -177,10 +177,8 @@ if __name__ == "__main__":
                 # obs_tensor = torch.from_numpy(obs).unsqueeze(0)
                 # policy inference
                 action = policy(obs_tensor).detach().numpy().squeeze()
-                # transform into mjc order
-                action = lab_to_mjc(action, joint_names_lab, joint_names_mjc)
                 # transform action to target_dof_pos
-                target_dof_pos = action * action_scale + default_angles
+                target_dof_pos = lab_to_mjc(action, joint_names_lab, joint_names_mjc) * action_scale + default_angles
 
             # Pick up changes to the physics state, apply perturbations, update options from GUI.
             viewer.sync()
