@@ -117,8 +117,8 @@ if __name__ == "__main__":
     obs_history_buf.reset(torch.from_numpy(obs).clone().unsqueeze(0))
     
     # # set init pos
-    # d.qpos[7:] = default_angles
-    # d.qpos[2] = 0.788
+    d.qpos[7:] = default_angles
+    d.qpos[2] = 0.783
     
     joint_names_mjc = []
     for i in range(1, m.njnt):
@@ -144,7 +144,9 @@ if __name__ == "__main__":
                 qj = d.qpos[7:]
                 dqj = d.qvel[6:]
                 quat = d.qpos[3:7]
-                omega = d.qvel[3:6]
+                # omega = d.qvel[3:6]
+                # quat = d.sensor('orientation').data.astype(np.double)
+                omega = d.sensor('imu-torso-angular-velocity').data.astype(np.double)
 
                 qj = (qj - default_angles) * dof_pos_scale
                 dqj = dqj * dof_vel_scale
