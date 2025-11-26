@@ -1,5 +1,5 @@
 # 
-policy_path: "/home/melwu/unitree_mujoco/policy/29dof_lock_waist_5_hist/2025-11-25_18-03-14_7000.pt"
+policy_path: "/home/melwu/unitree_mujoco/policy/29dof_lock_waist_no_hist/2025-11-26_14-25-59_5000.pt"
 xml_path: "/home/melwu/unitree_mujoco/unitree_robots/g1/g1_29dof_lock_waist.xml"
 
 # Total simulation time
@@ -33,7 +33,7 @@ action_scale: 0.25
 cmd_scale: [1.0, 1.0, 1.0]
 num_actions: 27
 num_obs: 90 # 3+3+3 + 29*3 (+2=98)
-history_length: 5
+history_length: 1
 
 cmd_init: [0, 0.4, 0]
 

@@ -117,8 +117,10 @@ if __name__ == "__main__":
     obs_history_buf.reset(torch.from_numpy(obs).clone().unsqueeze(0))
     
     # # set init pos
-    d.qpos[7:] = default_angles
+    d.qpos[7:] = default_angles.copy()
+    d.qvel[6:] = np.zeros_like(d.qvel[6:])
     d.qpos[2] = 0.783
+    mujoco.mj_forward(m, d)
     
     joint_names_mjc = []
     for i in range(1, m.njnt):
@@ -127,9 +129,7 @@ if __name__ == "__main__":
 
     with mujoco.viewer.launch_passive(m, d) as viewer:
         # Close the viewer automatically after simulation_duration wall-seconds.
-        start = time.time()
-        while viewer.is_running() and time.time() - start < simulation_duration:
-            step_start = time.time()
+        while viewer.is_running():
             tau = pd_control(target_dof_pos, d.qpos[7:], kps, np.zeros_like(kds), d.qvel[6:], kds)
             d.ctrl[:] = tau
             # mj_step can be replaced with code that also evaluates
@@ -143,10 +143,10 @@ if __name__ == "__main__":
                 # create observation
                 qj = d.qpos[7:]
                 dqj = d.qvel[6:]
-                quat = d.qpos[3:7]
-                # omega = d.qvel[3:6]
-                # quat = d.sensor('orientation').data.astype(np.double)
-                omega = d.sensor('imu-torso-angular-velocity').data.astype(np.double)
+                quat1 = d.qpos[3:7]
+                omega1 = d.qvel[3:6]
+                quat = d.sensor('imu_quat').data.astype(np.double)
+                omega = d.sensor('imu_gyro').data.astype(np.double)
 
                 qj = (qj - default_angles) * dof_pos_scale
                 dqj = dqj * dof_vel_scale
@@ -172,20 +172,19 @@ if __name__ == "__main__":
                 # print("qj", obs[9 : 9 + num_actions])
                 # print("dqj",obs[9 + num_actions : 9 + 2 * num_actions])
                 # print("action", action)
-                # with obs history
-                obs_history_buf.enqueue(torch.from_numpy(obs).clone().unsqueeze(0))
-                obs_tensor = torch.cat([obs_history_buf[i] for i in range(len(obs_history_buf))], dim=1)  # N, T*K
+                
+                # # with obs history
+                # obs_history_buf.enqueue(torch.from_numpy(obs).clone().unsqueeze(0))
+                # obs_tensor = torch.cat([obs_history_buf[i] for i in range(len(obs_history_buf))], dim=1)  # N, T*K
                 # without history
-                # obs_tensor = torch.from_numpy(obs).unsqueeze(0)
+                obs_tensor = torch.from_numpy(obs).unsqueeze(0)
                 # policy inference
                 action = policy(obs_tensor).detach().numpy().squeeze()
+                action_mjc = lab_to_mjc(action, joint_names_lab, joint_names_mjc)
                 # transform action to target_dof_pos
-                target_dof_pos = lab_to_mjc(action, joint_names_lab, joint_names_mjc) * action_scale + default_angles
+                target_dof_pos = action_mjc * action_scale + default_angles
+                # target_dof_pos = default_angles
 
             # Pick up changes to the physics state, apply perturbations, update options from GUI.
             viewer.sync()
-
-            # Rudimentary time keeping, will drift relative to wall clock.
-            time_until_next_step = m.opt.timestep - (time.time() - step_start)
-            if time_until_next_step > 0:
-                time.sleep(time_until_next_step)
+            
