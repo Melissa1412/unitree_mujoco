@@ -2,46 +2,12 @@ import time
 
 import mujoco.viewer
 import mujoco
-import numpy as np
-# from legged_gym import LEGGED_GYM_ROOT_DIR
 import torch
 import yaml
+from collections import deque
 
 from utils import *
 
-class FixedLengthQueue:
-    def __init__(self, max_length):
-        self.max_length = max_length
-        self.queue = []
-    
-    def enqueue(self, item):
-        if len(self.queue) >= self.max_length:
-            self.dequeue()
-        self.queue.append(item)
-    
-    def dequeue(self):
-        if self.queue:
-            return self.queue.pop(0)
-        return None
-
-    def __getitem__(self, index):
-        try:
-            return self.queue[index]
-        except IndexError:
-            RuntimeError("Index out of range")
-    
-    def reset(self, item):
-        self.queue = []
-        for _ in range(self.max_length):
-            self.queue.append(item)
-    
-    def __len__(self):
-        return len(self.queue)
-    
-    def __str__(self):
-        return str(self.queue)
-    
-    
 def get_gravity_orientation(quaternion):
     qw = quaternion[0]
     qx = quaternion[1]
@@ -105,6 +71,7 @@ if __name__ == "__main__":
     obs = np.zeros(num_obs, dtype=np.float32)
 
     counter = 0
+    obs_data = []  # List to store observation data
 
     # Load robot model
     m = mujoco.MjModel.from_xml_path(xml_path)
@@ -113,8 +80,7 @@ if __name__ == "__main__":
 
     # load policy
     policy = torch.jit.load(policy_path)
-    obs_history_buf = FixedLengthQueue(max_length=history_length)
-    obs_history_buf.reset(torch.from_numpy(obs).clone().unsqueeze(0))
+    obs_history_buf_by_term = [deque(maxlen=history_length) for _ in range(6)]
     
     # # set init pos
     d.qpos[7:] = default_angles.copy()
@@ -127,9 +93,11 @@ if __name__ == "__main__":
         # model.joint(i).name returns the name of the i-th joint
         joint_names_mjc.append(m.joint(i).name)    
 
+    start_time = time.time()
+    
     with mujoco.viewer.launch_passive(m, d) as viewer:
         # Close the viewer automatically after simulation_duration wall-seconds.
-        while viewer.is_running():
+        while viewer.is_running() and (time.time() - start_time) < simulation_duration:
             tau = pd_control(target_dof_pos, d.qpos[7:], kps, np.zeros_like(kds), d.qvel[6:], kds)
             d.ctrl[:] = tau
             # mj_step can be replaced with code that also evaluates
@@ -148,43 +116,82 @@ if __name__ == "__main__":
                 quat = d.sensor('imu_quat').data.astype(np.double)
                 omega = d.sensor('imu_gyro').data.astype(np.double)
 
-                qj = (qj - default_angles) * dof_pos_scale
-                dqj = dqj * dof_vel_scale
+                qj = mjc_to_lab((qj - default_angles) * dof_pos_scale, joint_names_mjc, joint_names_lab)
+                dqj = mjc_to_lab(dqj * dof_vel_scale, joint_names_mjc, joint_names_lab)
                 gravity_orientation = get_gravity_orientation(quat)
                 omega = omega * ang_vel_scale
+                cmd = cmd * cmd_scale
 
                 period = 0.8
                 count = counter * simulation_dt
                 phase = count % period / period
                 sin_phase = np.sin(2 * np.pi * phase)
                 cos_phase = np.cos(2 * np.pi * phase)
-
-                obs[:3] = omega
-                obs[3:6] = gravity_orientation
-                obs[6:9] = cmd * cmd_scale
-                obs[9 : 9 + num_actions] = mjc_to_lab(qj, joint_names_mjc, joint_names_lab)
-                obs[9 + num_actions : 9 + 2 * num_actions] = mjc_to_lab(dqj, joint_names_mjc, joint_names_lab)
-                obs[9 + 2 * num_actions : 9 + 3 * num_actions] = action
-                # obs[9 + 3 * num_actions : 9 + 3 * num_actions + 2] = np.array([sin_phase, cos_phase])
-                # print("omega", omega)
-                # print("gravity_orientation", gravity_orientation)
-                # print("cmd", obs[6:9])
-                # print("qj", obs[9 : 9 + num_actions])
-                # print("dqj",obs[9 + num_actions : 9 + 2 * num_actions])
-                # print("action", action)
                 
-                # # with obs history
-                # obs_history_buf.enqueue(torch.from_numpy(obs).clone().unsqueeze(0))
-                # obs_tensor = torch.cat([obs_history_buf[i] for i in range(len(obs_history_buf))], dim=1)  # N, T*K
-                # without history
-                obs_tensor = torch.from_numpy(obs).unsqueeze(0)
+                obs_terms = [
+                    omega, 
+                    gravity_orientation, 
+                    cmd, 
+                    qj, 
+                    dqj, 
+                    action]
+
+                obs[:3] = obs_terms[0]
+                obs[3:6] = obs_terms[1]
+                obs[6:9] = obs_terms[2]
+                obs[9 : 9 + num_actions] = obs_terms[3]
+                obs[9 + num_actions : 9 + 2 * num_actions] = obs_terms[4]
+                obs[9 + 2 * num_actions : 9 + 3 * num_actions] = obs_terms[5]
+                
+                # Store observation data
+                current_time = counter * simulation_dt
+                obs_entry = {
+                    'timestamp': current_time,
+                    'omega': omega.tolist(),
+                    'gravity_orientation': gravity_orientation.tolist(),
+                    'cmd': cmd.tolist(),
+                    'joint_positions': qj.tolist(),
+                    'joint_velocities': dqj.tolist(),
+                    'actions': action.tolist()
+                }
+                obs_data.append(obs_entry)
+                
+                # # without history
+                # obs_tensor = torch.from_numpy(obs).unsqueeze(0)
+                # with history
+                for i in range(len(obs_history_buf_by_term)):
+                    current_len = len(obs_history_buf_by_term[i])
+                    # Pad with zeros if needed
+                    if current_len < history_length:
+                        zeros_needed = history_length - current_len - 1
+                        obs_history_buf_by_term[i].extend([np.zeros_like(obs_terms[i])] * zeros_needed)
+                    # Append observation
+                    obs_history_buf_by_term[i].append(obs_terms[i])
+                    
+                obs_hist = np.concatenate([np.array(deq).flatten() for deq in obs_history_buf_by_term])
+                obs_tensor = torch.from_numpy(obs_hist).unsqueeze(0).float()
                 # policy inference
                 action = policy(obs_tensor).detach().numpy().squeeze()
                 action_mjc = lab_to_mjc(action, joint_names_lab, joint_names_mjc)
                 # transform action to target_dof_pos
                 target_dof_pos = action_mjc * action_scale + default_angles
-                # target_dof_pos = default_angles
 
             # Pick up changes to the physics state, apply perturbations, update options from GUI.
             viewer.sync()
-            
+    
+    # Save observation data file
+    data_dir = save_complete_obs_data(obs_data)
+    
+    # Create separate plots for each observation type and each joint
+    plots_dir = plot_separate_obs_data(obs_data, joint_names_lab)
+    
+    print(f"\nSimulation completed!")
+    print(f"Data saved in: {data_dir}/")
+    print(f"Plots saved in: {plots_dir}/")
+    print(f"\nGenerated plot files:")
+    print(f"- omega_plot.png")
+    print(f"- gravity_plot.png")
+    print(f"- commands_plot.png")
+    print(f"- all_joint_positions.png (29 subplots)")
+    print(f"- all_joint_velocities.png (29 subplots)")
+    print(f"- all_actions.png (29 subplots)")

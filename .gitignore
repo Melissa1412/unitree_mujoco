@@ -5,3 +5,5 @@
 **/install/
 simulate/mujoco
 *.log
+MUJOCO_LOG.TXT
+logs/
