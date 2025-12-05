@@ -7,43 +7,271 @@ from scipy.spatial.transform import Rotation as R
 
 
 class MotionLoader:
-    def __init__(self, motion_file: str):
-        assert os.path.isfile(motion_file), f"Invalid file path: {motion_file}"
-        data = np.load(motion_file)
-        self.fps = data["fps"]
-        self._joint_pos = data["joint_pos"]
-        self._joint_vel = data["joint_vel"]
-        self._body_pos_w = data["body_pos_w"]
-        self._body_quat_w = data["body_quat_w"]
-        self._body_lin_vel_w = data["body_lin_vel_w"]
-        self._body_ang_vel_w = data["body_ang_vel_w"]
-        self.index = 0
-        self.num_frames = self._joint_pos.shape[0]
-        # self.duration = self.num_frames / self.fps
+    def __init__(
+        self,
+        motion_file: str,
+        input_fps: int,
+        output_fps: int,
+        frame_range: tuple[int, int] | None,
+    ):
+        self.motion_file = motion_file
+        self.input_fps = input_fps
+        self.output_fps = output_fps
+        self.input_dt = 1.0 / self.input_fps
+        self.output_dt = 1.0 / self.output_fps
+        self.current_idx = 0
+        self.frame_range = frame_range
+        self._load_motion()
+        self._interpolate_motion()
+        self._compute_velocities()
 
-    def inc_time(self):
-        # phase = max(0, min(episode_length * 0.02 / self.duration, 1))
-        # self.index = math.floor(phase * (self.num_frames - 1))
-        self.index += 1
-        if self.index >= self.num_frames:
-            self.index = 0
+    def _load_motion(self):
+        """Loads the motion from the csv file."""
+        if self.frame_range is None:
+            motion = np.loadtxt(self.motion_file, delimiter=",")
+        else:
+            motion = np.loadtxt(
+                    self.motion_file,
+                    delimiter=",",
+                    skiprows=self.frame_range[0] - 1,
+                    max_rows=self.frame_range[1] - self.frame_range[0] + 1,
+                )
+        self.motion_base_poss_input = motion[:, :3]
+        self.motion_base_rots_input = motion[:, 3:7]
+        self.motion_base_rots_input = self.motion_base_rots_input[:, [3, 0, 1, 2]]  # convert to wxyz
+        self.motion_dof_poss_input = motion[:, 7:]
 
-    @property
-    def root_quat_w(self):
+        self.input_frames = motion.shape[0]
+        self.duration = (self.input_frames - 1) * self.input_dt
+        print(f"Motion loaded ({self.motion_file}), duration: {self.duration} sec, frames: {self.input_frames}")
+
+    def _interpolate_motion(self):
+        """Interpolates the motion to the output fps."""
+        times = np.arange(0, self.duration, self.output_dt)
+        self.output_frames = times.shape[0]
+        index_0, index_1, blend = self._compute_frame_blend(times)
+        self.motion_base_poss = self._lerp(
+            self.motion_base_poss_input[index_0],
+            self.motion_base_poss_input[index_1],
+            blend[:, np.newaxis],
+        )
+        self.motion_base_rots = self._slerp(
+            self.motion_base_rots_input[index_0],
+            self.motion_base_rots_input[index_1],
+            blend,
+        )
+        self.motion_dof_poss = self._lerp(
+            self.motion_dof_poss_input[index_0],
+            self.motion_dof_poss_input[index_1],
+            blend[:, np.newaxis],
+        )
+        print(
+            f"Motion interpolated, input frames: {self.input_frames}, input fps: {self.input_fps}, output frames:"
+            f" {self.output_frames}, output fps: {self.output_fps}"
+        )
+
+    def _lerp(self, a, b, blend):
+        """Linear interpolation between two arrays."""
+        return a * (1 - blend) + b * blend
+
+    def _slerp(self, a, b, blend):
+        """Spherical linear interpolation between two quaternions."""
+        slerped_quats = np.zeros_like(a)
+        for i in range(a.shape[0]):
+            slerped_quats[i] = quat_slerp(a[i], b[i], blend[i])
+        return slerped_quats
+
+    def _compute_frame_blend(self, times):
+        """Computes the frame blend for the motion."""
+        phase = times / self.duration
+        index_0 = np.floor((phase * (self.input_frames - 1)))
+        index_1 = np.minimum(index_0 + 1, self.input_frames - 1)
+        blend = phase * (self.input_frames - 1) - index_0
+        return index_0.astype(np.int32), index_1.astype(np.int32), blend
+
+    def _compute_velocities(self):
+        """Computes the velocities of the motion."""
+        self.motion_base_lin_vels = np.gradient(self.motion_base_poss, self.output_dt, axis=0)
+        self.motion_dof_vels = np.gradient(self.motion_dof_poss, self.output_dt, axis=0)
+        self.motion_base_ang_vels = self._so3_derivative(self.motion_base_rots, self.output_dt)
+
+    def _so3_derivative(self, rotations, dt: float):
+        """Computes the derivative of a sequence of SO3 rotations.
+
+        Args:
+            rotations: shape (4).
+            dt: time step.
+        Returns:
+            shape (B, 3).
         """
-        self._body_quat_w[self.index] gives [36, 4]
-        take the one for pelvis
-        """
-        return self._body_quat_w[self.index, 10]
+        q_prev, q_next = rotations[:-2], rotations[2:]
+        q_rel = quat_mul(q_next, quat_conjugate(q_prev))  # shape (4)
 
-    @property
-    def joint_pos(self):
-        return self._joint_pos[self.index]
+        omega = axis_angle_from_quat(q_rel) / (2.0 * dt)  # shape (3)
+        omega = np.concatenate([omega[:1], omega, omega[-1:]])  # repeat first and last sample
+        return omega
 
-    @property
-    def joint_vel(self):
-        return self._joint_vel[self.index]
+    def get_next_state(self,):
+        """Gets the next state of the motion."""
+        state = (
+            # self.motion_base_poss[self.current_idx : self.current_idx + 1],
+            self.motion_base_rots[self.current_idx],
+            # self.motion_base_lin_vels[self.current_idx : self.current_idx + 1],
+            # self.motion_base_ang_vels[self.current_idx : self.current_idx + 1],
+            self.motion_dof_poss[self.current_idx],
+            self.motion_dof_vels[self.current_idx],
+        )
+        self.current_idx += 1
+        if self.current_idx >= self.output_frames:
+            self.current_idx = 0
+        return state
+
+
+def quat_slerp(q1: np.ndarray, q2: np.ndarray, tau: float) -> np.ndarray:
+    """Performs spherical linear interpolation (SLERP) between two quaternions.
     
+    Args:
+        q1: First quaternion in (w, x, y, z) format. Shape is (4,).
+        q2: Second quaternion in (w, x, y, z) format. Shape is (4,).
+        tau: Interpolation coefficient between 0 (q1) and 1 (q2).
+
+    Returns:
+        Interpolated quaternion in (w, x, y, z) format. Shape is (4,).
+
+    Raises:
+        ValueError: Input shapes are not (4,).
+    """
+    # Check input shapes
+    if q1.shape != (4,) or q2.shape != (4,):
+        raise ValueError(f"Expected 1D arrays with shape (4,). Got {q1.shape} and {q2.shape}.")
+    
+    # Edge cases
+    if tau == 0.0:
+        return q1.copy()
+    elif tau == 1.0:
+        return q2.copy()
+    
+    # Normalize inputs
+    q1 = q1 / np.linalg.norm(q1)
+    q2 = q2 / np.linalg.norm(q2)
+    
+    # Dot product
+    d = np.dot(q1, q2)
+    
+    # Handle nearly identical quaternions
+    if np.abs(np.abs(d) - 1.0) < np.finfo(q1.dtype).eps * 4.0:
+        return q1.copy()
+    
+    # Ensure shortest path
+    if d < 0.0:
+        d = -d
+        q2 = -q2
+    
+    # Clamp to valid range for acos
+    d = np.clip(d, -1.0, 1.0)
+    angle = np.arccos(d)
+    
+    # Handle very small angles
+    if np.abs(angle) < np.finfo(q1.dtype).eps * 4.0:
+        return q1.copy()
+    
+    # SLERP formula
+    sin_angle = np.sin(angle)
+    isin = 1.0 / sin_angle
+    w1 = np.sin((1.0 - tau) * angle) * isin
+    w2 = np.sin(tau * angle) * isin
+    
+    result = w1 * q1 + w2 * q2
+    
+    # Normalize result
+    return result / np.linalg.norm(result)
+
+
+def quat_mul(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
+    """Multiply two quaternions together.
+    
+    Args:
+        q1: The first quaternion in (w, x, y, z). Shape is (4,).
+        q2: The second quaternion in (w, x, y, z). Shape is (4,).
+
+    Returns:
+        The product of the two quaternions in (w, x, y, z). Shape is (4,).
+
+    Raises:
+        ValueError: Input shapes are not (4,) or don't match.
+    """
+    # extract components from quaternions
+    w1, x1, y1, z1 = q1[0], q1[1], q1[2], q1[3]
+    w2, x2, y2, z2 = q2[0], q2[1], q2[2], q2[3]
+    
+    # perform multiplication (optimized formula)
+    ww = (z1 + x1) * (x2 + y2)
+    yy = (w1 - y1) * (w2 + z2)
+    zz = (w1 + y1) * (w2 - z2)
+    xx = ww + yy + zz
+    qq = 0.5 * (xx + (z1 - x1) * (x2 - y2))
+    
+    w = qq - ww + (z1 - y1) * (y2 - z2)
+    x = qq - xx + (x1 + w1) * (x2 + w2)
+    y = qq - yy + (w1 - x1) * (y2 + z2)
+    z = qq - zz + (z1 + y1) * (w2 - x2)
+    
+    return np.array([w, x, y, z])
+
+
+def quat_conjugate(q):
+    """Computes the conjugate of a quaternion.
+
+    Args:
+        q: The quaternion orientation in (w, x, y, z). Shape is (4).
+
+    Returns:
+        The conjugate quaternion in (w, x, y, z). Shape is (4).
+    """
+    
+    return np.array([q[0], -q[1], -q[2], -q[3]])
+
+
+def axis_angle_from_quat(quat: np.ndarray, eps: float = 1.0e-6) -> np.ndarray:
+    """Convert rotations given as quaternions to axis/angle.
+
+    Args:
+        quat: The quaternion orientation in (w, x, y, z). Shape is (..., 4).
+        eps: The tolerance for Taylor approximation. Defaults to 1.0e-6.
+
+    Returns:
+        Rotations given as a vector in axis angle form. Shape is (..., 3).
+        The vector's magnitude is the angle turned anti-clockwise in radians 
+        around the vector's direction.
+    """
+    # Ensure positive real part (w)
+    # quat * (1.0 - 2.0 * (quat[..., 0:1] < 0.0))
+    w_negative = quat[..., 0:1] < 0.0
+    quat = quat * (1.0 - 2.0 * w_negative)
+    
+    # Magnitude of vector part [x, y, z]
+    mag = np.linalg.norm(quat[..., 1:], axis=-1)
+    
+    # Compute half angle and full angle
+    half_angle = np.arctan2(mag, quat[..., 0])
+    angle = 2.0 * half_angle
+    
+    # Compute sin(half_angle) / angle with Taylor approximation for small angles
+    sin_half_angle = np.sin(half_angle)
+    
+    # Use np.where for conditional computation
+    sin_half_angles_over_angles = np.where(
+        np.abs(angle) > eps,
+        sin_half_angle / angle,
+        0.5 - angle * angle / 48
+    )
+    
+    # Add new axis for broadcasting: sin_half_angles_over_angles from (...,) to (..., 1)
+    sin_half_angles_over_angles = sin_half_angles_over_angles[..., np.newaxis]
+    
+    # Return axis-angle representation
+    return quat[..., 1:4] / sin_half_angles_over_angles
+  
 
 def get_gravity_orientation(quaternion):
     qw = quaternion[0]
@@ -158,7 +386,7 @@ def torso_quat_w(quaternion, qj):
     return np.array([torso_quat[3], torso_quat[0], torso_quat[1], torso_quat[2]])
 
 
-def anchor_quat_w(loader):
+def anchor_quat_w(root_quat, joint_pos):
     """
     计算锚点（躯干）在世界坐标系下的四元数
     
@@ -167,36 +395,29 @@ def anchor_quat_w(loader):
     返回:
         torso_quat: 躯干的四元数 (w, x, y, z)
     """
-    # 获取根四元数
-    root_quat = loader.root_quat_w  # 假设返回 numpy array [w, x, y, z] # [36,4]??
-    
-    # 获取关节位置
-    joint_pos = loader.joint_pos  # in lab order not mjc (left hip pitch, right hip pitch, waist yaw, ...)
-    
     # 创建根四元数的旋转对象
     root_rot = R.from_quat([root_quat[1], root_quat[2], root_quat[3], root_quat[0]])
     
     # 应用三个关节旋转
     # 关节12: 绕Z轴旋转
-    rot_z = R.from_euler('z', joint_pos[2])
+    rot_z = R.from_euler('z', joint_pos[12])
     # 关节13: 绕X轴旋转
-    rot_x = R.from_euler('x', joint_pos[5])
+    rot_x = R.from_euler('x', joint_pos[13])
     # 关节14: 绕Y轴旋转
-    rot_y = R.from_euler('y', joint_pos[8])
+    rot_y = R.from_euler('y', joint_pos[14])
     
     # 组合旋转: root * Rz * Rx * Ry
     torso_rot = root_rot * rot_z * rot_x * rot_y
     
     # 返回四元数 (w, x, y, z 格式)
     torso_quat = torso_rot.as_quat()  # [x, y, z, w]
-    return np.array([torso_quat[3], torso_quat[0], 
-                     torso_quat[1], torso_quat[2]])
+    return np.array([torso_quat[3], torso_quat[0], torso_quat[1], torso_quat[2]])
 
 
-def motion_anchor_ori_b(quaternion, qj, motion_loader, init_quat):
+def motion_anchor_ori_b(quaternion, qj, motion_base_rot, motion_dof_pos, init_quat):
     # 获取真实和参考四元数
     real_quat_w = torso_quat_w(quaternion, qj) # [w, x, y, z]
-    ref_quat_w = anchor_quat_w(motion_loader)  # [w, x, y, z]
+    ref_quat_w = anchor_quat_w(motion_base_rot, motion_dof_pos)  # [w, x, y, z]
 
     # 转换为SciPy格式: [x, y, z, w]
     def to_scipy_format(q):

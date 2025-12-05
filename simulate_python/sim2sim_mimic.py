@@ -54,7 +54,12 @@ if __name__ == "__main__":
     obs_data = []  # List to store observation data
 
     # Load motion
-    motion = MotionLoader(motion_file=motion_path)
+    motion = MotionLoader(
+        motion_file=motion_path,
+        input_fps=60,
+        output_fps=50,
+        frame_range=(200, 14000)
+        )
 
     # Load robot model
     m = mujoco.MjModel.from_xml_path(xml_path)
@@ -68,9 +73,16 @@ if __name__ == "__main__":
     # set init pos
     d.qpos[7:] = default_angles.copy()
     d.qvel[6:] = np.zeros_like(d.qvel[6:])
-    # d.qpos[2] = 0.783
+    d.qpos[2] = 0.76
     mujoco.mj_forward(m, d)
     
+    """ smae as skd names in unitree.py
+    ['left_hip_pitch_joint', 'left_hip_roll_joint', 'left_hip_yaw_joint', 'left_knee_joint', 'left_ankle_pitch_joint', 'left_ankle_roll_joint', 
+     'right_hip_pitch_joint', 'right_hip_roll_joint', 'right_hip_yaw_joint', 'right_knee_joint', 'right_ankle_pitch_joint', 'right_ankle_roll_joint', 
+     'waist_yaw_joint', 'waist_roll_joint', 'waist_pitch_joint', 
+     'left_shoulder_pitch_joint', 'left_shoulder_roll_joint', 'left_shoulder_yaw_joint', 'left_elbow_joint', 'left_wrist_roll_joint', 'left_wrist_pitch_joint', 'left_wrist_yaw_joint', 
+     'right_shoulder_pitch_joint', 'right_shoulder_roll_joint', 'right_shoulder_yaw_joint', 'right_elbow_joint', 'right_wrist_roll_joint', 'right_wrist_pitch_joint', 'right_wrist_yaw_joint']
+    """
     joint_names_mjc = []
     for i in range(1, m.njnt):
         # model.joint(i).name returns the name of the i-th joint
@@ -79,7 +91,8 @@ if __name__ == "__main__":
     start_time = time.time()
     # episode_length = 0
 
-    motion_root_quat = anchor_quat_w(motion)
+    motion_base_rot, motion_dof_pos, motion_dof_vel = motion.get_next_state()
+    motion_root_quat = anchor_quat_w(motion_base_rot, motion_dof_pos)
     torso_quat = torso_quat_w(d.sensor('imu_quat').data.astype(np.double), d.qpos[7:])
     init_quat = compute_init_quat(motion_root_quat, torso_quat)
     
@@ -95,15 +108,17 @@ if __name__ == "__main__":
             counter += 1
             if counter % control_decimation == 0:
                 # create observation
-                cmd = np.concatenate([motion.joint_pos, motion.joint_vel])
+                motion_base_rot, motion_dof_pos, motion_dof_vel = motion.get_next_state()
+                cmd = np.concatenate([
+                    mjc_to_lab(motion_dof_pos, joint_names_mjc, joint_names_lab), 
+                    mjc_to_lab(motion_dof_vel, joint_names_mjc, joint_names_lab)])
                 qj = d.qpos[7:]
                 dqj = d.qvel[6:]
                 quat = d.sensor('imu_quat').data.astype(np.double)
                 omega = d.sensor('imu_gyro').data.astype(np.double)
-
                 qj = mjc_to_lab((qj - default_angles) * dof_pos_scale, joint_names_mjc, joint_names_lab)
                 dqj = mjc_to_lab(dqj * dof_vel_scale, joint_names_mjc, joint_names_lab)
-                motion_anchor_ori_b_value = motion_anchor_ori_b(quat, qj, motion, init_quat)
+                motion_anchor_ori_b_value = motion_anchor_ori_b(quat, qj, motion_base_rot, motion_dof_pos, init_quat)
                 omega = omega * ang_vel_scale
                 cmd = cmd * cmd_scale
 
@@ -131,6 +146,8 @@ if __name__ == "__main__":
                 
                 # Store observation data
                 current_time = counter * simulation_dt
+                qj = mjc_to_lab(d.qpos[7:], joint_names_mjc, joint_names_lab)
+
                 obs_entry = {
                     'timestamp': current_time,
                     'omega': omega.tolist(),
@@ -163,7 +180,7 @@ if __name__ == "__main__":
                 target_dof_pos = action_mjc * action_scale + default_angles
 
                 # episode_length += 1
-                motion.inc_time()
+                # motion.inc_time()
 
             # Pick up changes to the physics state, apply perturbations, update options from GUI.
             viewer.sync()
