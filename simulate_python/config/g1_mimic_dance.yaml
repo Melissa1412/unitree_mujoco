@@ -1,7 +1,8 @@
 # 
-policy_path: "/home/melissa/humanoid/unitree_mujoco/policy/29dof_mimic_dance/2025-12-03_11-51-33.pt"
-xml_path: "/home/melissa/humanoid/unitree_mujoco/unitree_robots/g1/g1_29dof.xml"
-motion_path: "/home/melissa/humanoid/unitree_mujoco/simulate_python/motion_file/G1_Take_102.bvh_60hz.csv"
+# policy_path: "humanoid/unitree_mujoco/policy/29dof_mimic_dance/policy.onnx"
+policy_path: "humanoid/unitree_mujoco/policy/29dof_mimic_dance/2025-12-03_11-51-33.pt"
+xml_path: "humanoid/unitree_mujoco/unitree_robots/g1/g1_29dof.xml"
+motion_path: "humanoid/unitree_mujoco/simulate_python/motion_file/G1_Take_102.bvh_60hz.csv"
 
 # Total simulation time
 simulation_duration: 6000.0

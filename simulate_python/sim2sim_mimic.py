@@ -1,9 +1,12 @@
 import time
+import os
+from pathlib import Path
 
 import mujoco.viewer
 import mujoco
 import torch
 import yaml
+import onnxruntime as ort
 from collections import deque
 
 from utils import *
@@ -19,9 +22,10 @@ if __name__ == "__main__":
     config_file = args.config_file
     with open(f"simulate_python/config/{config_file}", "r") as f:
         config = yaml.load(f, Loader=yaml.FullLoader)
-        policy_path = config["policy_path"]
-        xml_path = config["xml_path"]
-        motion_path = config["motion_path"]
+        home_dir = Path.home()
+        policy_path = os.path.join(home_dir, config["policy_path"])
+        xml_path = os.path.join(home_dir, config["xml_path"])
+        motion_path = os.path.join(home_dir, config["motion_path"])
 
         simulation_duration = config["simulation_duration"]
         simulation_dt = config["simulation_dt"]
@@ -66,8 +70,27 @@ if __name__ == "__main__":
     d = mujoco.MjData(m)
     m.opt.timestep = simulation_dt
 
-    # load policy
-    policy = torch.jit.load(policy_path)
+    # Load policy based on file extension
+    policy_extension = os.path.splitext(policy_path)[1].lower()
+    policy_type = None
+    
+    if policy_extension == '.pt':
+        policy_type = 'torch'
+        policy = torch.jit.load(policy_path)
+        print(f"Loaded PyTorch model from {policy_path}")
+    elif policy_extension == '.onnx':
+        policy_type = 'onnx'
+        # Create ONNX Runtime session
+        ort_session = ort.InferenceSession(
+            policy_path,
+            providers=['CPUExecutionProvider']  # Use CUDAExecutionProvider for GPU if available
+        )
+        # Get input name for ONNX model
+        input_name = ort_session.get_inputs()[0].name
+        print(f"Loaded ONNX model from {policy_path}")
+    else:
+        raise ValueError(f"Unsupported policy file format: {policy_extension}. Use .pt or .onnx")
+    
     obs_history_buf_by_term = [deque(maxlen=history_length) for _ in range(6)]
     
     # set init pos
@@ -76,7 +99,7 @@ if __name__ == "__main__":
     d.qpos[2] = 0.76
     mujoco.mj_forward(m, d)
     
-    """ smae as skd names in unitree.py
+    """ same as skd names in unitree.py
     ['left_hip_pitch_joint', 'left_hip_roll_joint', 'left_hip_yaw_joint', 'left_knee_joint', 'left_ankle_pitch_joint', 'left_ankle_roll_joint', 
      'right_hip_pitch_joint', 'right_hip_roll_joint', 'right_hip_yaw_joint', 'right_knee_joint', 'right_ankle_pitch_joint', 'right_ankle_roll_joint', 
      'waist_yaw_joint', 'waist_roll_joint', 'waist_pitch_joint', 
@@ -173,8 +196,17 @@ if __name__ == "__main__":
                     
                 # obs_hist = np.concatenate([np.array(deq).flatten() for deq in obs_history_buf_by_term])
                 # obs_tensor = torch.from_numpy(obs_hist).unsqueeze(0).float()
-                # policy inference
-                action = policy(obs_tensor).detach().numpy().squeeze()
+                
+                # policy inference based on model type
+                if policy_type == 'torch':
+                    # PyTorch model inference
+                    action = policy(obs_tensor).detach().numpy().squeeze()
+                elif policy_type == 'onnx':
+                    # ONNX model inference
+                    # Ensure the input is float32 for ONNX Runtime
+                    obs_input = obs_tensor.numpy().astype(np.float32)
+                    action = ort_session.run(None, {input_name: obs_input})[0].squeeze()
+                
                 action_mjc = lab_to_mjc(action, joint_names_lab, joint_names_mjc)
                 # transform action to target_dof_pos
                 target_dof_pos = action_mjc * action_scale + default_angles
@@ -192,6 +224,7 @@ if __name__ == "__main__":
     plots_dir = plot_separate_obs_data(obs_data, joint_names_lab)
     
     print(f"\nSimulation completed!")
+    print(f"Policy type: {policy_type.upper()}")
     print(f"Data saved in: {data_dir}/")
     print(f"Plots saved in: {plots_dir}/")
     print(f"\nGenerated plot files:")

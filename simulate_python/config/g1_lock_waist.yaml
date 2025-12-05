@@ -1,6 +1,6 @@
 # 
-policy_path: "/home/melwu/unitree_mujoco/policy/29dof_lock_waist_5_hist/2025-11-24_19-32-37_7000.pt"
-xml_path: "/home/melwu/unitree_mujoco/unitree_robots/g1/g1_29dof_lock_waist.xml"
+policy_path: "humanoid/unitree_mujoco/policy/29dof_lock_waist_5_hist/2025-11-24_19-32-37_7000.pt"
+xml_path: "humanoid/unitree_mujoco/unitree_robots/g1/g1_29dof_lock_waist.xml"
 
 # Total simulation time
 simulation_duration: 60.0

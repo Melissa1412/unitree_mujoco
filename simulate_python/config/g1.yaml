@@ -1,6 +1,6 @@
 # 
-policy_path: "/home/melissa/humanoid/unitree_mujoco/policy/29dof_5_hist/2025-11-24_18-10-24_7000.pt"
-xml_path: "/home/melissa/humanoid/unitree_mujoco/unitree_robots/g1/g1_29dof.xml"
+policy_path: "humanoid/unitree_mujoco/policy/29dof_5_hist/2025-11-24_18-10-24_7000.pt"
+xml_path: "humanoid/unitree_mujoco/unitree_robots/g1/g1_29dof.xml"
 
 # Total simulation time
 simulation_duration: 6000.0
